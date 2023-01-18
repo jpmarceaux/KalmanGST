@@ -1,0 +1,14 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+numpy = "*"
+scipy = "*"
+pyGSTi = { git = 'https://github.com/pyGSTio/pyGSTi.git', ref = 'develop', editable = true }
+
+[dev-packages]
+
+[requires]
+python_version = "3.10"
