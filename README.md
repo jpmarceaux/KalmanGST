@@ -1,2 +1,2 @@
 # KalmanGST
-Supporting files for the paper "Extended filtering of gate set tomography"
+Supporting files for the paper "Online gate set tomography with the extended Kalman filtery"
