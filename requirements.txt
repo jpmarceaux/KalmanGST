@@ -1,0 +1,5 @@
+matplotlib==3.6.2
+numpy==1.23.5
+pyGSTi==0.9.10.1.post307
+scipy==1.10.1
+tqdm==4.64.1
