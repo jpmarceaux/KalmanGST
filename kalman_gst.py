@@ -13,7 +13,7 @@ def process_is_cptp(process_mat):
     """
     choi_mat = pygsti.tools.jamiolkowski_iso(process_mat)
     eigs = np.linalg.eigvals(choi_mat)
-    if np.any(eigs < 0):
+    if np.any(eigs < -1e-6):
         return False
     else:
         return True
