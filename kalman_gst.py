@@ -37,6 +37,31 @@ def model_is_cptp(model_in):
     else:
         return False
     
+from scipy.optimize import NonlinearConstraint, minimize 
+
+def choi_eigs(param_vec, ref_model):
+    """
+    return a stacked vector of eigenvalues of all model choi matrices
+    """
+    ref_model.from_vector(param_vec)
+    cmats = []
+    for g in ref_model.operations.keys():
+        cmats.append(pygsti.tools.jamiolkowski.jamiolkowski_iso(ref_model[g].to_dense()))
+    cmats.append(pygsti.tools.jamiolkowski.jamiolkowski_iso(ref_model['Mdefault'].error_map.to_dense()))
+    cmats.append(pygsti.tools.jamiolkowski.jamiolkowski_iso(ref_model['rho0'].error_map.to_dense()))
+    return np.hstack([np.linalg.eigvals(c).real for c in cmats])
+
+def MSE(x1, x2):
+    return sum((x1[i] - x2[i])**2 for i in range(len(x1)))
+
+def project_params_to_cp(model):
+    """
+    find the "nearest" cp model to the given model
+    """
+    constraints = NonlinearConstraint(lambda x: choi_eigs(x, model), 0, np.inf)
+    res = minimize(MSE, model.to_vector(), args=model.to_vector(), constraints=[constraints])  
+    return res.x
+    
 from pygsti.report import reportables as rptbl
 
 def avg_gs_infidelity(model, noise_model, qubits=1):
