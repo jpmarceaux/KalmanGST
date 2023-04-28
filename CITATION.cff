@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: Marceaux
+    given-names: J. P. 
+title: "KalmanGST"
+version: 0.0.1
+date-released: 04-11-2023
