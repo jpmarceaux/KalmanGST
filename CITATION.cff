@@ -4,5 +4,6 @@ authors:
   - family-names: Marceaux
     given-names: J. P. 
 title: "KalmanGST"
+url: https://github.com/jpmarceaux/KalmanGST
 version: 0.0.1
 date-released: 04-11-2023
