@@ -1,9 +1,254 @@
 import numpy as np
 import pygsti
-import random
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import pickle
+
+
+class ExtendedKalmanFilter():
+    """
+    An extended Kalman filter for gate-set tomography
+
+    --- Parameters ---
+    model: an underlying pygsti model
+    num_params: number of parameters in the pygsti model
+    P: current covariance matrix
+    """
+
+    def __init__(self, model, P0):
+        self.model = model.copy()
+        self.P = P0
+
+        self.param_history = [self.model.to_vector()]
+        self.covar_history = [self.P]
+
+    def update(self, circ, count_vec, clip_range=[-1, 1], Q=None, R_additional=None, max_itr=1, itr_eps=1e-4):
+        """
+        Makes an exact update to the model
+        where the jacobian is calculated as the current estimate
+
+        --- Arguments ---
+        circ: pygsti circuit used in the update
+        count_vec: vector of observed counts
+        clip_range: reasonable clipping range for the parameter update
+        Q: state-space covariance
+        R_additional: additional measurement covariance
+        max_itr: maximum number of iterations to the update
+        itr_eps: epsilon for minimum difference to end iterated updates
+
+        --- Returns ---
+        innovation: the prior innovation
+        kgain: the Kalman gain
+        """
+        prior_covar = self.P
+        prior_state = self.model.to_vector()
+        hilbert_dims = 2 ** (circ.width)
+
+        for itr in range(max_itr):
+            # find the predicted frequency for the circuit outcome under the model
+            probs = self.model.probabilities(circ)
+            p_model = vector_from_outcomes(probs, hilbert_dims)
+
+            # calculate the observed frequency
+            total_counts = sum(count_vec)
+            observation = count_vec / total_counts
+
+            # calculate jacobian
+            jacob = matrix_from_jacob(self.model.sim.dprobs(circ), 2 ** circ.width)
+
+            # calculate the covaraiance of the observation
+            mean_frequency = (count_vec + np.ones(len(count_vec))) / (sum(count_vec) + len(count_vec))
+            R = (1 / (sum(count_vec) + len(count_vec) + 1)) * categorical_covar(mean_frequency)
+
+            # add any additional noise
+            if R_additional is not None:
+                R += R_additional
+            if Q is None:
+                Q = 0 * np.eye(self.model.num_params)
+
+            # Kalman gain
+            P = prior_covar + Q
+            kgain = P @ jacob.T @ np.linalg.pinv(jacob @ P @ jacob.T + R, 1e-15)
+
+            # Kalman update
+            innovation = observation - p_model
+            post_state = prior_state + kgain @ innovation
+            post_state = np.clip(post_state, clip_range[0], clip_range[1])
+
+            # check if iteration should end
+            if np.linalg.norm(post_state - prior_state) < itr_eps:
+                break
+            else:
+                prior_state = post_state
+                self.model.from_vector(post_state)
+
+        # update class parameters
+        self.P = (np.eye(self.model.num_params) - kgain @ jacob) @ P
+        self.model.from_vector(post_state)
+
+        self.param_history.append(post_state)
+        self.covar_history.append(self.P)
+
+        return innovation, kgain
+
+    def update_approx(self, circ, count_vec, p0, jac0, hess0, clip_range=[-1, 1], max_itr=1, itr_eps=1e-4, Q=None,
+                      R_additional=None):
+        """
+        Makes an approximate update to the model
+        where the jacobian is approximated
+
+        --- Arguments ---
+        circ: pygsti circuit used in the update
+        count_vec: vector of observed counts
+        p0: target model prediction
+        jac0: target model jacobian
+        hess0: target model hessian
+        clip_range: reasonable clipping range for the parameter update
+        Q: state-space covariance
+        R_additional: additional measurement covariance
+        max_itr: maximum number of iterations to the update
+        itr_eps: epsilon for minimum difference to end iterated updates
+
+        --- Returns ---
+        innov: the innovation
+        kgain: the Kalman gain
+        """
+        prior_covar = self.P
+        prior_state = self.model.to_vector()
+        hilbert_dims = 2 ** (circ.width)
+
+        for itr in range(max_itr):
+            # approximate predicted frequency for the circuit outcome under the model
+            p_model = p0 + jac0 @ prior_state + prior_state @ hess0 @ prior_state
+
+            # approximate the jacobian at the current estimate
+            jacob = jac0 + hess0 @ prior_state
+
+            # calculate the observed frequency
+            total_counts = sum(count_vec)
+            observation = count_vec / total_counts
+
+            # calculate the covaraiance of the observation
+            mean_frequency = (count_vec + np.ones(len(count_vec))) / (sum(count_vec) + len(count_vec))
+            R = (1 / (sum(count_vec) + len(count_vec) + 1)) * categorical_covar(mean_frequency)
+
+            # add any additional noise
+            if R_additional is not None:
+                R += R_additional
+            if Q is None:
+                Q = 0 * np.eye(self.model.num_params)
+
+            # Kalman gain
+            P = prior_covar + Q
+            kgain = P @ jacob.T @ np.linalg.pinv(jacob @ P @ jacob.T + R, 1e-9)
+
+            # Kalman update
+            innovation = observation - p_model
+            post_state = prior_state + kgain @ innovation
+            post_state = np.clip(post_state, clip_range[0], clip_range[1])
+
+            # check if iteration should end
+            if np.linalg.norm(post_state - prior_state) < itr_eps:
+                break
+            else:
+                prior_state = post_state
+                self.model.from_vector(post_state)
+
+        # update class parameters
+        self.P = (np.eye(self.model.num_params) - kgain @ jacob) @ P
+        self.model.from_vector(post_state)
+
+        self.param_history.append(post_state)
+        self.covar_history.append(self.P)
+        return innovation, kgain
+
+    def update_fast(self, circ, count_vec, jac0, hess0, clip_range=[-1, 1], max_itr=1, itr_eps=1e-4, Q=None,
+                    R_additional=None):
+        """
+        Makes an approximate update to the model
+        where the jacobian is approximated
+
+        --- Arguments ---
+        circ: pygsti circuit used in the update
+        count_vec: vector of observed counts
+        p0: target model prediction
+        jac0: target model jacobian
+        hess0: target model hessian
+        clip_range: reasonable clipping range for the parameter update
+        Q: state-space covariance
+        R_additional: additional measurement covariance
+        max_itr: maximum number of iterations to the update
+        itr_eps: epsilon for minimum difference to end iterated updates
+
+        --- Returns ---
+        innov: the innovation
+        kgain: the Kalman gain
+        """
+        prior_covar = self.P
+        prior_state = self.model.to_vector()
+        hilbert_dims = 2 ** (circ.width)
+
+        for itr in range(max_itr):
+            # approximate predicted frequency for the circuit outcome under the model
+            p_model = vector_from_outcomes(self.model.probabilities(circ), 2 ** circ.width)
+
+            # approximate the jacobian at the current estimate
+            jacob = jac0 + hess0 @ prior_state
+
+            # calculate the observed frequency
+            total_counts = sum(count_vec)
+            observation = count_vec / total_counts
+
+            # calculate the covaraiance of the observation
+            mean_frequency = (count_vec + np.ones(len(count_vec))) / (sum(count_vec) + len(count_vec))
+            R = (1 / (sum(count_vec) + len(count_vec) + 1)) * categorical_covar(mean_frequency)
+
+            # add any additional noise
+            if R_additional is not None:
+                R += R_additional
+            if Q is None:
+                Q = 0 * np.eye(self.model.num_params)
+
+            # Kalman gain
+            P = prior_covar + Q
+            kgain = P @ jacob.T @ np.linalg.pinv(jacob @ P @ jacob.T + R, 1e-9)
+
+            # Kalman update
+            innovation = observation - p_model
+            post_state = prior_state + kgain @ innovation
+            post_state = np.clip(post_state, clip_range[0], clip_range[1])
+
+            # check if iteration should end
+            if np.linalg.norm(post_state - prior_state) < itr_eps:
+                break
+            else:
+                prior_state = post_state
+                self.model.from_vector(post_state)
+
+        # update class parameters
+        self.P = (np.eye(self.model.num_params) - kgain @ jacob) @ P
+        self.model.from_vector(post_state)
+
+        self.param_history.append(post_state)
+        self.covar_history.append(self.P)
+        return innovation, kgain
+
+    def filter_dataset(self, circuit_list, dataset):
+        """
+        batch filter of the given circuits in the dataset using exact updates
+        """
+        for circ in tqdm(circuit_list):
+            count_vec = vector_from_outcomes(dataset[circ].counts, 2 ** circ.width)
+            self.update(circ, count_vec)
+
+    def fast_filter_dataset(self, circuit_list, dataset, jacobians, hessians):
+        """
+        batch filter of the given circuits in the dataset using fast updates
+        """
+        for circ in tqdm(circuit_list):
+            count_vec = vector_from_outcomes(dataset[circ].counts, 2 ** circ.width)
+            self.update_fast(circ, count_vec, jacobians[circ], hessians[circ])
+
 
 def process_is_cptp(process_mat):
     """
@@ -129,251 +374,7 @@ def dirichlet_covar(count_vec):
     mean_frequency = ( count_vec + np.ones(hdims) )/( total_counts + hdims )
     return 1/(total_counts + hdims + 1) * categorical_covar(mean_frequency)
 
-class ExtendedKalmanFilter():
-    """
-    An extended Kalman filter for gate-set tomography
-    
-    --- Parameters ---
-    model: an underlying pygsti model
-    num_params: number of parameters in the pygsti model
-    P: current covariance matrix
-    """
-    def __init__(self, model, P0):
-        self.model = model.copy()
-        self.P = P0
-        
-        self.param_history = [self.model.to_vector()]
-        self.covar_history = [self.P]
-        
-    def update(self, circ, count_vec, clip_range=[-1,1], Q=None, R_additional=None, max_itr=1, itr_eps=1e-4):
-        """
-        Makes an exact update to the model
-        where the jacobian is calculated as the current estimate
-        
-        --- Arguments ---
-        circ: pygsti circuit used in the update
-        count_vec: vector of observed counts
-        clip_range: reasonable clipping range for the parameter update
-        Q: state-space covariance 
-        R_additional: additional measurement covariance
-        max_itr: maximum number of iterations to the update
-        itr_eps: epsilon for minimum difference to end iterated updates
-        
-        --- Returns --- 
-        innovation: the prior innovation
-        kgain: the Kalman gain
-        """
-        prior_covar = self.P
-        prior_state = self.model.to_vector()
-        hilbert_dims = 2**(circ.width)
-        
-        for itr in range(max_itr):
-            # find the predicted frequency for the circuit outcome under the model
-            probs = self.model.probabilities(circ)
-            p_model = vector_from_outcomes(probs, hilbert_dims)
-            
-            # calculate the observed frequency
-            total_counts = sum(count_vec)
-            observation = count_vec/total_counts
 
-            # calculate jacobian
-            jacob = matrix_from_jacob(self.model.sim.dprobs(circ), 2**circ.width)
-
-            # calculate the covaraiance of the observation
-            mean_frequency = ( count_vec+np.ones(len(count_vec)) )/( sum(count_vec)+len(count_vec) )
-            R = (1/(sum(count_vec)+len(count_vec)+1))*categorical_covar(mean_frequency)
-            
-            # add any additional noise
-            if R_additional is not None:
-                R += R_additional
-            if Q is None: 
-                Q = 0*np.eye(self.model.num_params)
-
-            # Kalman gain
-            P = prior_covar + Q
-            kgain = P@jacob.T@np.linalg.pinv(jacob@P@jacob.T + R, 1e-15)
-            
-            # Kalman update
-            innovation = observation - p_model
-            post_state = prior_state + kgain@innovation
-            post_state = np.clip(post_state, clip_range[0], clip_range[1])
-            
-            # check if iteration should end
-            if np.linalg.norm(post_state - prior_state) < itr_eps:
-                break
-            else:
-                prior_state = post_state
-                self.model.from_vector(post_state)
-        
-        # update class parameters
-        self.P = (np.eye(self.model.num_params) - kgain@jacob)@P
-        self.model.from_vector(post_state)
-        
-        self.param_history.append(post_state)
-        self.covar_history.append(self.P)
-        
-        return innovation, kgain 
-            
-    def update_approx(self, circ, count_vec, p0, jac0, hess0, clip_range=[-1, 1], max_itr=1, itr_eps=1e-4, Q=None, R_additional=None):
-        """
-        Makes an approximate update to the model
-        where the jacobian is approximated
-        
-        --- Arguments ---
-        circ: pygsti circuit used in the update
-        count_vec: vector of observed counts
-        p0: target model prediction
-        jac0: target model jacobian
-        hess0: target model hessian
-        clip_range: reasonable clipping range for the parameter update
-        Q: state-space covariance 
-        R_additional: additional measurement covariance
-        max_itr: maximum number of iterations to the update
-        itr_eps: epsilon for minimum difference to end iterated updates
-        
-        --- Returns --- 
-        innov: the innovation
-        kgain: the Kalman gain
-        """
-        prior_covar = self.P
-        prior_state = self.model.to_vector()
-        hilbert_dims = 2**(circ.width)
-        
-        for itr in range(max_itr):
-            # approximate predicted frequency for the circuit outcome under the model
-            p_model = p0 + jac0@prior_state + prior_state@hess0@prior_state
-            
-            # approximate the jacobian at the current estimate
-            jacob = jac0 + hess0@prior_state
-            
-            # calculate the observed frequency
-            total_counts = sum(count_vec)
-            observation = count_vec/total_counts
-
-            # calculate the covaraiance of the observation
-            mean_frequency = ( count_vec+np.ones(len(count_vec)) )/( sum(count_vec)+len(count_vec) )
-            R = (1/(sum(count_vec)+len(count_vec)+1))*categorical_covar(mean_frequency)
-            
-            # add any additional noise
-            if R_additional is not None:
-                R += R_additional
-            if Q is None: 
-                Q = 0*np.eye(self.model.num_params)
-
-            # Kalman gain
-            P = prior_covar + Q
-            kgain = P@jacob.T@np.linalg.pinv(jacob@P@jacob.T + R, 1e-9)
-            
-            # Kalman update
-            innovation = observation - p_model
-            post_state = prior_state + kgain@innovation
-            post_state = np.clip(post_state, clip_range[0], clip_range[1])
-            
-            # check if iteration should end
-            if np.linalg.norm(post_state - prior_state) < itr_eps:
-                break
-            else:
-                prior_state = post_state
-                self.model.from_vector(post_state)
-        
-        # update class parameters
-        self.P = (np.eye(self.model.num_params) - kgain@jacob)@P
-        self.model.from_vector(post_state)
-        
-        self.param_history.append(post_state)
-        self.covar_history.append(self.P)
-        return innovation, kgain
-    
-    def update_fast(self, circ, count_vec, jac0, hess0, clip_range=[-1, 1], max_itr=1, itr_eps=1e-4, Q=None, R_additional=None):
-        """
-        Makes an approximate update to the model
-        where the jacobian is approximated
-        
-        --- Arguments ---
-        circ: pygsti circuit used in the update
-        count_vec: vector of observed counts
-        p0: target model prediction
-        jac0: target model jacobian
-        hess0: target model hessian
-        clip_range: reasonable clipping range for the parameter update
-        Q: state-space covariance 
-        R_additional: additional measurement covariance
-        max_itr: maximum number of iterations to the update
-        itr_eps: epsilon for minimum difference to end iterated updates
-        
-        --- Returns --- 
-        innov: the innovation
-        kgain: the Kalman gain
-        """
-        prior_covar = self.P
-        prior_state = self.model.to_vector()
-        hilbert_dims = 2**(circ.width)
-        
-        for itr in range(max_itr):
-            # approximate predicted frequency for the circuit outcome under the model
-            p_model = vector_from_outcomes(self.model.probabilities(circ), 2**circ.width)
-            
-            # approximate the jacobian at the current estimate
-            jacob = jac0 + hess0@prior_state
-            
-            # calculate the observed frequency
-            total_counts = sum(count_vec)
-            observation = count_vec/total_counts
-
-            # calculate the covaraiance of the observation
-            mean_frequency = ( count_vec+np.ones(len(count_vec)) )/( sum(count_vec)+len(count_vec) )
-            R = (1/(sum(count_vec)+len(count_vec)+1))*categorical_covar(mean_frequency)
-            
-            # add any additional noise
-            if R_additional is not None:
-                R += R_additional
-            if Q is None: 
-                Q = 0*np.eye(self.model.num_params)
-
-            # Kalman gain
-            P = prior_covar + Q
-            kgain = P@jacob.T@np.linalg.pinv(jacob@P@jacob.T + R, 1e-9)
-            
-            # Kalman update
-            innovation = observation - p_model
-            post_state = prior_state + kgain@innovation
-            post_state = np.clip(post_state, clip_range[0], clip_range[1])
-            
-            # check if iteration should end
-            if np.linalg.norm(post_state - prior_state) < itr_eps:
-                break
-            else:
-                prior_state = post_state
-                self.model.from_vector(post_state)
-        
-        # update class parameters
-        self.P = (np.eye(self.model.num_params) - kgain@jacob)@P
-        self.model.from_vector(post_state)
-        
-        self.param_history.append(post_state)
-        self.covar_history.append(self.P)
-        return innovation, kgain
-    
-    def filter_dataset(self, circuit_list, dataset):
-        """
-        batch filter of the given circuits in the dataset using exact updates
-        """
-        for circ in tqdm(circuit_list):
-            count_vec = vector_from_outcomes(dataset[circ].counts, 2**circ.width)
-            self.update(circ, count_vec)
-        
-    
-    def fast_filter_dataset(self, circuit_list, dataset, jacobians, hessians):
-        """
-        batch filter of the given circuits in the dataset using fast updates
-        """
-        for circ in tqdm(circuit_list):
-            count_vec = vector_from_outcomes(dataset[circ].counts, 2**circ.width)
-            self.update_fast(circ, count_vec, jacobians[circ], hessians[circ])
-        
-        
-    
-    
     
 def pickle_dict(obj, filename):
     """
